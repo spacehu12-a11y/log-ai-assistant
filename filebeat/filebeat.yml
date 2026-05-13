@@ -1,15 +1,17 @@
 filebeat.inputs:
   - type: filestream
-    id: vpn-log-input
+    id: vpn-syslog-input
     enabled: true
     paths:
       - /var/log/app/vpn_logs.log
 
-processors:
-  - add_fields:
-      target: ''
-      fields:
-        source_type: vpn
+    fields_under_root: true
+    fields:
+      source_type: vpn
+      log_type: vpn
+      source_format: syslog
+      env: dev
+      collector: filebeat
 
 output.kafka:
   hosts: ["kafka:9092"]
@@ -18,3 +20,9 @@ output.kafka:
   compression: gzip
   codec.json:
     pretty: false
+
+processors:
+  - add_host_metadata: ~
+  - drop_fields:
+      fields: ["agent", "ecs", "input"]
+      ignore_missing: true

@@ -44,3 +44,19 @@ log-generator/vpn_output/*.log
 *.pid
 *.out
 *.err
+.python-version
+
+# local runtime files
+.venv/
+__pycache__/
+*.pyc
+.python-version
+
+# generated logs
+logs/*.log
+logs/*.csv
+logs/*.jsonl
+log-generator/tmp_output/
+
+# downloaded connector jars
+lib/*.jar

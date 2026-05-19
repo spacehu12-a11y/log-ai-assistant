@@ -58,7 +58,8 @@ class ElasticStorage:
         return [hit["_source"] | {"_id": hit["_id"]} for hit in resp["hits"]["hits"]]
 
     def aggregate(self, index: str, body: dict[str, Any]) -> dict[str, Any]:
-        return self.client.search(index=index, body=body)
+        resp = self.client.search(index=index, body=body)
+        return dict(resp)
 
     def fetch_recent_logs(self, hours: int = 24, size: int = 5000) -> list[dict[str, Any]]:
         return self.fetch_recent_logs_by_field(hours=hours, size=size, time_field="event_time")
@@ -131,6 +132,12 @@ def index_templates() -> dict[str, dict[str, Any]]:
                     "related_logs_summary": {"type": "text"},
                     "status": {"type": "keyword"},
                     "llm_analysis_id": {"type": "keyword"},
+                    "alert_type": {"type": "keyword"},
+                    "ueba_score": {"type": "integer"},
+                    "baseline_id": {"type": "keyword"},
+                    "baseline_confidence": {"type": "float"},
+                    "deviation_features": {"type": "object", "enabled": True},
+                    "anomaly_reasons": {"type": "keyword"},
                 }
             }
         },

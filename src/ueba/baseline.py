@@ -98,9 +98,11 @@ def _iqr(values: list[float]) -> float:
 def _confidence(sample_count: int) -> float:
     if sample_count <= 0:
         return 0.0
+    if sample_count >= 500:
+        return 0.95
     if sample_count >= 100:
-        return 1.0
-    return round(sample_count / 100, 2)
+        return round(0.50 + 0.45 * (sample_count - 100) / 400, 2)
+    return round(sample_count / 200, 2)
 
 
 def _top_keys(counter: Counter[str], n: int) -> list[str]:

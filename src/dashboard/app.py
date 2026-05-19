@@ -26,6 +26,17 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+PAGES = [
+    "系统概览",
+    "UEBA 告警分析",
+    "用户画像",
+    "实时异常解释",
+    "最近日志",
+    "AI 研判",
+    "每日安全态势简报",
+    "系统运行状态",
+]
+
 
 # ---------------------------------------------------------------------
 # Global resources
@@ -38,9 +49,51 @@ def get_storage() -> ElasticStorage:
 
 
 def get_analyzer() -> AIAnalyzer:
-    # Do not cache the analyzer here. Keeping this object uncached avoids
-    # Streamlit cache-state edge cases after manual reruns or page switching.
+    # Keep the analyzer uncached to avoid Streamlit cache-state edge cases.
     return AIAnalyzer()
+
+
+def _rerun() -> None:
+    try:
+        st.rerun()
+    except AttributeError:
+        st.experimental_rerun()
+
+
+def init_state() -> None:
+    if "current_page" not in st.session_state:
+        st.session_state.current_page = PAGES[0]
+
+
+def set_page(page: str) -> None:
+    st.session_state.current_page = page
+
+
+def render_sidebar_nav() -> None:
+    st.sidebar.title("日志分析 AI 助手")
+    st.sidebar.caption("实时日志流 · Docker Flink · UEBA 用户画像")
+    st.sidebar.markdown("### 页面切换")
+
+    current_page = st.session_state.get("current_page", PAGES[0])
+    clicked_page: str | None = None
+
+    for idx, page in enumerate(PAGES):
+        label = page
+        if page == current_page:
+            label = f"👉 {page}"
+
+        if st.sidebar.button(label, key=f"nav_btn_{idx}", use_container_width=True):
+            clicked_page = page
+
+    if clicked_page and clicked_page != current_page:
+        set_page(clicked_page)
+        _rerun()
+
+    st.sidebar.divider()
+    st.sidebar.caption(f"当前页面：{st.session_state.get('current_page', PAGES[0])}")
+
+    if st.sidebar.button("刷新当前页面", use_container_width=True, key="refresh_current_page"):
+        _rerun()
 
 
 # ---------------------------------------------------------------------
@@ -83,12 +136,6 @@ def recent_range_query(time_field: str, hours: int = 24) -> dict[str, Any]:
 
 
 def ueba_filter_query() -> dict[str, Any]:
-    """
-    兼容不同 ES 动态映射：
-    - alert_type 是 keyword
-    - alert_type 是 text + keyword
-    - alert_type 仅为 text
-    """
     return {
         "bool": {
             "should": [
@@ -101,20 +148,19 @@ def ueba_filter_query() -> dict[str, Any]:
     }
 
 
-def safe_get_path(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
+def safe_get_path(data: Any, *keys: str, default: Any = None) -> Any:
     current: Any = data
     for key in keys:
-        if not isinstance(current, dict):
+        try:
+            current = current[key]
+        except (KeyError, TypeError):
             return default
-        current = current.get(key)
     return current if current is not None else default
 
 
 def select_existing_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     existing = [c for c in columns if c in df.columns]
-    if not existing:
-        return df
-    return df[existing]
+    return df[existing] if existing else df
 
 
 def as_percent(value: Any) -> float:
@@ -133,14 +179,7 @@ def distribution_to_df(
     if not isinstance(dist, dict) or not dist:
         return pd.DataFrame(columns=[key_name, value_name])
 
-    rows = [
-        {
-            key_name: str(k),
-            value_name: as_percent(v),
-        }
-        for k, v in dist.items()
-    ]
-
+    rows = [{key_name: str(k), value_name: as_percent(v)} for k, v in dist.items()]
     df = pd.DataFrame(rows)
     if df.empty:
         return df
@@ -148,21 +187,17 @@ def distribution_to_df(
     df = df.sort_values(value_name, ascending=False)
     if top_n:
         df = df.head(top_n)
-
     return df
 
 
 def hour_hist_to_df(dist: dict[str, Any] | None) -> pd.DataFrame:
     dist = dist or {}
-    rows = []
-    for h in range(24):
-        rows.append(
-            {
-                "小时": f"{h:02d}:00",
-                "占比(%)": as_percent(dist.get(str(h), 0)),
-            }
-        )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(
+        [
+            {"小时": f"{h:02d}:00", "占比(%)": as_percent(dist.get(str(h), 0))}
+            for h in range(24)
+        ]
+    )
 
 
 def weekday_hist_to_df(dist: dict[str, Any] | None) -> pd.DataFrame:
@@ -176,16 +211,12 @@ def weekday_hist_to_df(dist: dict[str, Any] | None) -> pd.DataFrame:
         "5": "周六",
         "6": "周日",
     }
-    rows = []
-    for i in range(7):
-        key = str(i)
-        rows.append(
-            {
-                "星期": labels[key],
-                "占比(%)": as_percent(dist.get(key, 0)),
-            }
-        )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(
+        [
+            {"星期": labels[str(i)], "占比(%)": as_percent(dist.get(str(i), 0))}
+            for i in range(7)
+        ]
+    )
 
 
 def chart_bar(df: pd.DataFrame, x_col: str, y_col: str, title: str, height: int = 320) -> None:
@@ -201,21 +232,13 @@ def chart_bar(df: pd.DataFrame, x_col: str, y_col: str, title: str, height: int 
             x=alt.X(
                 f"{x_col}:N",
                 sort="-y",
-                axis=alt.Axis(
-                    title=None,
-                    labelAngle=0,
-                    labelLimit=160,
-                ),
+                axis=alt.Axis(title=None, labelAngle=0, labelLimit=160),
             ),
-            y=alt.Y(
-                f"{y_col}:Q",
-                axis=alt.Axis(title=None),
-            ),
+            y=alt.Y(f"{y_col}:Q", axis=alt.Axis(title=None)),
             tooltip=list(df.columns),
         )
         .properties(height=height)
     )
-
     st.altair_chart(chart, use_container_width=True)
 
 
@@ -231,21 +254,13 @@ def chart_line(df: pd.DataFrame, x_col: str, y_col: str, title: str, height: int
         .encode(
             x=alt.X(
                 f"{x_col}:N",
-                axis=alt.Axis(
-                    title=None,
-                    labelAngle=0,
-                    labelLimit=160,
-                ),
+                axis=alt.Axis(title=None, labelAngle=0, labelLimit=160),
             ),
-            y=alt.Y(
-                f"{y_col}:Q",
-                axis=alt.Axis(title=None),
-            ),
+            y=alt.Y(f"{y_col}:Q", axis=alt.Axis(title=None)),
             tooltip=list(df.columns),
         )
         .properties(height=height)
     )
-
     st.altair_chart(chart, use_container_width=True)
 
 
@@ -279,20 +294,13 @@ def date_histogram(
     rows = []
     for b in buckets:
         raw_time = b.get("key_as_string", "")
-
         try:
             dt = pd.to_datetime(raw_time)
             label = dt.strftime("%H:%M")
         except Exception:
             label = raw_time
 
-        rows.append(
-            {
-                "时间": label,
-                "原始时间": raw_time,
-                "数量": b.get("doc_count", 0),
-            }
-        )
+        rows.append({"时间": label, "原始时间": raw_time, "数量": b.get("doc_count", 0)})
 
     return pd.DataFrame(rows)
 
@@ -307,14 +315,7 @@ def terms_aggregation(
     body = {
         "size": 0,
         "query": query or {"match_all": {}},
-        "aggs": {
-            "items": {
-                "terms": {
-                    "field": field,
-                    "size": size,
-                }
-            }
-        },
+        "aggs": {"items": {"terms": {"field": field, "size": size}}},
     }
 
     try:
@@ -323,15 +324,7 @@ def terms_aggregation(
     except Exception:
         buckets = []
 
-    return pd.DataFrame(
-        [
-            {
-                "名称": b.get("key"),
-                "数量": b.get("doc_count", 0),
-            }
-            for b in buckets
-        ]
-    )
+    return pd.DataFrame([{"名称": b.get("key"), "数量": b.get("doc_count", 0)} for b in buckets])
 
 
 def ueba_score_histogram(storage: ElasticStorage, query: dict[str, Any]) -> pd.DataFrame:
@@ -355,17 +348,12 @@ def ueba_score_histogram(storage: ElasticStorage, query: dict[str, Any]) -> pd.D
     except Exception:
         buckets = []
 
-    rows = []
-    for b in buckets:
-        key = int(b.get("key", 0))
-        rows.append(
-            {
-                "分数段": f"{key}-{key + 9}",
-                "告警数": b.get("doc_count", 0),
-            }
-        )
-
-    return pd.DataFrame(rows)
+    return pd.DataFrame(
+        [
+            {"分数段": f"{int(b.get('key', 0))}-{int(b.get('key', 0)) + 9}", "告警数": b.get("doc_count", 0)}
+            for b in buckets
+        ]
+    )
 
 
 def top_risky_users(storage: ElasticStorage, query: dict[str, Any], size: int = 10) -> pd.DataFrame:
@@ -374,10 +362,7 @@ def top_risky_users(storage: ElasticStorage, query: dict[str, Any], size: int = 
         "query": query,
         "aggs": {
             "users": {
-                "terms": {
-                    "field": "username",
-                    "size": size,
-                },
+                "terms": {"field": "username", "size": size},
                 "aggs": {
                     "avg_ueba_score": {"avg": {"field": "ueba_score"}},
                     "max_ueba_score": {"max": {"field": "ueba_score"}},
@@ -404,7 +389,6 @@ def top_risky_users(storage: ElasticStorage, query: dict[str, Any], size: int = 
                 "最近告警时间": b.get("last_time", {}).get("value_as_string", ""),
             }
         )
-
     return pd.DataFrame(rows)
 
 
@@ -446,14 +430,10 @@ def load_ueba_alerts(
     username: str = "",
     size: int = 500,
 ) -> list[dict[str, Any]]:
-    must: list[dict[str, Any]] = [
-        recent_range_query("detect_time", hours),
-        ueba_filter_query(),
-    ]
+    must: list[dict[str, Any]] = [recent_range_query("detect_time", hours), ueba_filter_query()]
 
     if risk != "全部":
         must.append({"term": {"risk_level": risk}})
-
     if username:
         must.append({"term": {"username": username}})
 
@@ -482,7 +462,6 @@ def deviation_average_df(alerts: list[dict[str, Any]]) -> pd.DataFrame:
     for alert in alerts:
         evidence = alert.get("evidence") or {}
         deviation = alert.get("deviation_features") or evidence.get("deviation_features") or {}
-
         rows.append(
             {
                 "时间偏离": deviation.get("time_score", 0) or 0,
@@ -495,38 +474,61 @@ def deviation_average_df(alerts: list[dict[str, Any]]) -> pd.DataFrame:
         )
 
     df = pd.DataFrame(rows)
+    return pd.DataFrame({"维度": df.columns, "平均分": [round(float(df[col].mean()), 2) for col in df.columns]})
 
-    return pd.DataFrame(
-        {
-            "维度": df.columns,
-            "平均分": [round(float(df[col].mean()), 2) for col in df.columns],
-        }
+
+def render_time_window_controls() -> tuple[datetime, datetime]:
+    st.markdown("#### 时间范围")
+    mode = st.selectbox(
+        "选择时间范围",
+        ["最近15分钟", "最近1小时", "最近6小时", "最近24小时", "最近7天", "自定义范围"],
+        index=3,
+        key="recent_logs_range_mode",
     )
 
+    now = utc_now()
+    preset_map = {
+        "最近15分钟": timedelta(minutes=15),
+        "最近1小时": timedelta(hours=1),
+        "最近6小时": timedelta(hours=6),
+        "最近24小时": timedelta(hours=24),
+        "最近7天": timedelta(days=7),
+    }
 
-def get_query_page(default: str) -> str:
-    try:
-        value = st.query_params.get("page", default)
-        if isinstance(value, list):
-            return value[0] if value else default
-        return value or default
-    except Exception:
-        try:
-            params = st.experimental_get_query_params()
-            value = params.get("page", [default])
-            return value[0] if value else default
-        except Exception:
-            return default
+    if mode != "自定义范围":
+        end_time = now
+        start_time = now - preset_map[mode]
+        st.caption(f"当前查询窗口：{iso(start_time)} ~ {iso(end_time)} (UTC)")
+        return start_time, end_time
 
+    st.caption("自定义范围按 UTC 时间查询")
+    c1, c2, c3, c4 = st.columns(4)
+    start_date = c1.date_input(
+        "开始日期",
+        value=(now - timedelta(days=1)).date(),
+        key="recent_logs_start_date",
+    )
+    start_clock = c2.time_input(
+        "开始时刻",
+        value=(now - timedelta(days=1)).time().replace(microsecond=0),
+        key="recent_logs_start_time",
+    )
+    end_date = c3.date_input("结束日期", value=now.date(), key="recent_logs_end_date")
+    end_clock = c4.time_input(
+        "结束时刻",
+        value=now.time().replace(microsecond=0),
+        key="recent_logs_end_time",
+    )
 
-def set_query_page(page: str) -> None:
-    try:
-        st.query_params["page"] = page
-    except Exception:
-        try:
-            st.experimental_set_query_params(page=page)
-        except Exception:
-            pass
+    start_time = datetime.combine(start_date, start_clock).replace(tzinfo=timezone.utc)
+    end_time = datetime.combine(end_date, end_clock).replace(tzinfo=timezone.utc)
+
+    if end_time < start_time:
+        st.warning("结束时间早于开始时间，已自动交换。")
+        start_time, end_time = end_time, start_time
+
+    st.caption(f"当前查询窗口：{iso(start_time)} ~ {iso(end_time)} (UTC)")
+    return start_time, end_time
 
 
 # ---------------------------------------------------------------------
@@ -538,28 +540,13 @@ def page_overview(storage: ElasticStorage) -> None:
     st.title("系统概览")
 
     today_log_query = today_range_query("ingest_time")
-    today_alert_query = {
-        "bool": {
-            "must": [
-                today_range_query("detect_time"),
-                ueba_filter_query(),
-            ]
-        }
-    }
+    today_alert_query = {"bool": {"must": [today_range_query("detect_time"), ueba_filter_query()]}}
 
     log_count = storage.count(settings.elasticsearch_log_index, today_log_query)
     ueba_alert_count = storage.count(settings.elasticsearch_alert_index, today_alert_query)
     high_ueba_count = storage.count(
         settings.elasticsearch_alert_index,
-        {
-            "bool": {
-                "must": [
-                    today_range_query("detect_time"),
-                    ueba_filter_query(),
-                    {"term": {"risk_level": "高"}},
-                ]
-            }
-        },
+        {"bool": {"must": [today_range_query("detect_time"), ueba_filter_query(), {"term": {"risk_level": "高"}}]}},
     )
     baseline_count = storage.count(settings.elasticsearch_baseline_index)
     ai_count = storage.count(settings.elasticsearch_ai_index)
@@ -591,11 +578,9 @@ def page_overview(storage: ElasticStorage) -> None:
         },
     )
 
-    avg_score = (
-        safe_get_path(avg_score_resp, "aggregations", "avg_ueba_score", "value", default=None)
-        or safe_get_path(avg_score_resp, "aggregations", "avg_risk_score", "value", default=0)
-        or 0
-    )
+    ueba_avg_val = safe_get_path(avg_score_resp, "aggregations", "avg_ueba_score", "value")
+    risk_avg_val = safe_get_path(avg_score_resp, "aggregations", "avg_risk_score", "value")
+    avg_score = ueba_avg_val if ueba_avg_val is not None else (risk_avg_val if risk_avg_val is not None else 0)
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("今日日志总量", log_count)
@@ -608,42 +593,32 @@ def page_overview(storage: ElasticStorage) -> None:
     st.divider()
 
     col1, col2 = st.columns(2)
-
     with col1:
-        log_trend = date_histogram(
-            storage,
-            settings.elasticsearch_log_index,
-            "ingest_time",
-            today_log_query,
-            interval="1h",
+        chart_line(
+            date_histogram(storage, settings.elasticsearch_log_index, "ingest_time", today_log_query, interval="1h"),
+            "时间",
+            "数量",
+            "今日日志流入趋势",
         )
-        chart_line(log_trend, "时间", "数量", "今日日志流入趋势")
-
     with col2:
-        alert_trend = date_histogram(
-            storage,
-            settings.elasticsearch_alert_index,
-            "detect_time",
-            today_alert_query,
-            interval="1h",
+        chart_line(
+            date_histogram(storage, settings.elasticsearch_alert_index, "detect_time", today_alert_query, interval="1h"),
+            "时间",
+            "数量",
+            "今日UEBA告警趋势",
         )
-        chart_line(alert_trend, "时间", "数量", "今日UEBA告警趋势")
 
     st.divider()
 
     recent_alerts = load_ueba_alerts(storage, hours=24, size=300)
     col3, col4 = st.columns(2)
-
     with col3:
-        risk_df = terms_aggregation(
-            storage,
-            settings.elasticsearch_alert_index,
-            "risk_level",
-            today_alert_query,
-            size=10,
+        chart_bar(
+            terms_aggregation(storage, settings.elasticsearch_alert_index, "risk_level", today_alert_query, size=10),
+            "名称",
+            "数量",
+            "今日UEBA风险等级分布",
         )
-        chart_bar(risk_df, "名称", "数量", "今日UEBA风险等级分布")
-
     with col4:
         top_users = top_risky_users(storage, today_alert_query, size=10)
         if not top_users.empty:
@@ -652,8 +627,7 @@ def page_overview(storage: ElasticStorage) -> None:
             st.subheader("今日Top风险用户")
             st.info("暂无数据")
 
-    deviation_df = deviation_average_df(recent_alerts)
-    chart_bar(deviation_df, "维度", "平均分", "最近24小时平均偏离维度")
+    chart_bar(deviation_average_df(recent_alerts), "维度", "平均分", "最近24小时平均偏离维度")
 
 
 def page_ueba_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
@@ -665,20 +639,12 @@ def page_ueba_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
     username = c3.text_input("用户")
     size = c4.number_input("读取告警数", min_value=50, max_value=2000, value=500, step=50)
 
-    alerts = load_ueba_alerts(
-        storage,
-        hours=int(hours),
-        risk=risk,
-        username=username,
-        size=int(size),
-    )
-
+    alerts = load_ueba_alerts(storage, hours=int(hours), risk=risk, username=username, size=int(size))
     if not alerts:
         st.info("暂无 UEBA 告警")
         return
 
-    flat_rows = [flatten_ueba_alert(item) for item in alerts]
-    df = pd.DataFrame(flat_rows)
+    df = pd.DataFrame([flatten_ueba_alert(item) for item in alerts])
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("UEBA告警数", len(df))
@@ -688,21 +654,10 @@ def page_ueba_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
 
     st.divider()
 
-    score_query = {
-        "bool": {
-            "must": [
-                recent_range_query("detect_time", int(hours)),
-                ueba_filter_query(),
-            ]
-        }
-    }
-
+    score_query = {"bool": {"must": [recent_range_query("detect_time", int(hours)), ueba_filter_query()]}}
     c5, c6 = st.columns(2)
-
     with c5:
-        score_hist = ueba_score_histogram(storage, score_query)
-        chart_bar(score_hist, "分数段", "告警数", "UEBA 分数分布")
-
+        chart_bar(ueba_score_histogram(storage, score_query), "分数段", "告警数", "UEBA 分数分布")
     with c6:
         top_users_df = top_risky_users(storage, score_query, size=10)
         if not top_users_df.empty:
@@ -711,36 +666,39 @@ def page_ueba_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
             st.subheader("Top 10 告警用户")
             st.info("暂无数据")
 
-    deviation_df = deviation_average_df(alerts)
-    chart_bar(deviation_df, "维度", "平均分", "平均偏离维度")
+    chart_bar(deviation_average_df(alerts), "维度", "平均分", "平均偏离维度")
 
     st.subheader("UEBA 告警明细")
-    visible_cols = [
-        "detect_time",
-        "username",
-        "src_ip",
-        "risk_level",
-        "ueba_score",
-        "baseline_confidence",
-        "time_score",
-        "ip_score",
-        "geo_score",
-        "access_score",
-        "volume_score",
-        "result_score",
-        "country",
-        "city",
-        "status",
-        "anomaly_reasons",
-    ]
-    st.dataframe(select_existing_columns(df, visible_cols), use_container_width=True)
+    st.dataframe(
+        select_existing_columns(
+            df,
+            [
+                "detect_time",
+                "username",
+                "src_ip",
+                "risk_level",
+                "ueba_score",
+                "baseline_confidence",
+                "time_score",
+                "ip_score",
+                "geo_score",
+                "access_score",
+                "volume_score",
+                "result_score",
+                "country",
+                "city",
+                "status",
+                "anomaly_reasons",
+            ],
+        ),
+        use_container_width=True,
+    )
 
     selected_id = st.selectbox("选择告警查看详情", options=df["alert_id"].tolist())
     selected = next(item for item in alerts if item.get("alert_id") == selected_id)
 
     st.subheader("UEBA 告警详情")
     d1, d2 = st.columns([1, 1])
-
     with d1:
         st.markdown("**异常解释**")
         reasons = selected.get("anomaly_reasons") or safe_get_path(selected, "evidence", "anomaly_reasons", default=[])
@@ -749,10 +707,8 @@ def page_ueba_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
                 st.write(f"- {reason}")
         else:
             st.info("暂无异常解释")
-
         st.markdown("**当前行为**")
         st.json(safe_get_path(selected, "evidence", "current_behavior", default={}))
-
     with d2:
         deviation = selected.get("deviation_features") or safe_get_path(selected, "evidence", "deviation_features", default={})
         dev_df = pd.DataFrame(
@@ -783,7 +739,6 @@ def page_ueba_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
         query={"term": {"username": selected.get("username")}},
         size=1,
     )
-
     with st.expander("用户行为画像"):
         st.json(baseline[0] if baseline else {})
 
@@ -793,7 +748,6 @@ def page_ueba_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
         size=1,
         sort=[{"created_at": "desc"}],
     )
-
     with st.expander("AI 研判结果"):
         st.json(ai_report[0] if ai_report else {})
 
@@ -801,8 +755,7 @@ def page_ueba_alerts(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
         alert = AlertEvent.model_validate(selected)
         baseline_doc = baseline[0] if baseline else {}
         report = analyzer.analyze(alert, baseline=baseline_doc, related_logs=related_logs)
-        report_doc = report.model_dump(mode="json")
-        storage.index_document(settings.elasticsearch_ai_index, report_doc, doc_id=report.ai_report_id)
+        storage.index_document(settings.elasticsearch_ai_index, report.model_dump(mode="json"), doc_id=report.ai_report_id)
         storage.update_document(
             settings.elasticsearch_alert_index,
             selected_id,
@@ -841,48 +794,32 @@ def page_user_profile(storage: ElasticStorage) -> None:
     st.divider()
 
     col1, col2 = st.columns(2)
-
     with col1:
-        hour_df = hour_hist_to_df(time_profile.get("hour_hist"))
-        chart_bar(hour_df, "小时", "占比(%)", "登录小时分布")
-
+        chart_bar(hour_hist_to_df(time_profile.get("hour_hist")), "小时", "占比(%)", "登录小时分布")
     with col2:
-        weekday_df = weekday_hist_to_df(time_profile.get("weekday_hist"))
-        chart_bar(weekday_df, "星期", "占比(%)", "星期登录分布")
+        chart_bar(weekday_hist_to_df(time_profile.get("weekday_hist")), "星期", "占比(%)", "星期登录分布")
 
     st.divider()
 
     col3, col4 = st.columns(2)
-
     with col3:
-        ip_df = distribution_to_df(location_profile.get("ip_prefixes"), "IP前缀", top_n=10)
-        chart_bar(ip_df, "IP前缀", "占比(%)", "常用 IP 前缀 Top 10")
-
+        chart_bar(distribution_to_df(location_profile.get("ip_prefixes"), "IP前缀", top_n=10), "IP前缀", "占比(%)", "常用 IP 前缀 Top 10")
     with col4:
-        city_df = distribution_to_df(location_profile.get("cities"), "城市", top_n=10)
-        chart_bar(city_df, "城市", "占比(%)", "常用城市 Top 10")
+        chart_bar(distribution_to_df(location_profile.get("cities"), "城市", top_n=10), "城市", "占比(%)", "常用城市 Top 10")
 
     st.divider()
 
     col5, col6 = st.columns(2)
-
     with col5:
-        protocol_df = distribution_to_df(access_profile.get("protocols"), "协议", top_n=10)
-        chart_bar(protocol_df, "协议", "占比(%)", "VPN 协议分布")
-
+        chart_bar(distribution_to_df(access_profile.get("protocols"), "协议", top_n=10), "协议", "占比(%)", "VPN 协议分布")
     with col6:
-        client_df = distribution_to_df(access_profile.get("clients"), "客户端", top_n=10)
-        chart_bar(client_df, "客户端", "占比(%)", "客户端分布")
+        chart_bar(distribution_to_df(access_profile.get("clients"), "客户端", top_n=10), "客户端", "占比(%)", "客户端分布")
 
     col7, col8 = st.columns(2)
-
     with col7:
-        gateway_df = distribution_to_df(access_profile.get("gateways"), "网关", top_n=10)
-        chart_bar(gateway_df, "网关", "占比(%)", "VPN 网关分布")
-
+        chart_bar(distribution_to_df(access_profile.get("gateways"), "网关", top_n=10), "网关", "占比(%)", "VPN 网关分布")
     with col8:
-        auth_df = distribution_to_df(access_profile.get("auth_methods"), "认证方式", top_n=10)
-        chart_bar(auth_df, "认证方式", "占比(%)", "认证方式分布")
+        chart_bar(distribution_to_df(access_profile.get("auth_methods"), "认证方式", top_n=10), "认证方式", "占比(%)", "认证方式分布")
 
     st.divider()
 
@@ -902,10 +839,8 @@ def page_user_profile(storage: ElasticStorage) -> None:
     if not user_alerts:
         st.info("该用户最近暂无 UEBA 告警")
     else:
-        user_df = pd.DataFrame([flatten_ueba_alert(item) for item in user_alerts])
-        user_df = user_df.sort_values("detect_time")
+        user_df = pd.DataFrame([flatten_ueba_alert(item) for item in user_alerts]).sort_values("detect_time")
         chart_line(user_df, "detect_time", "ueba_score", "该用户 UEBA 分数变化")
-
         st.dataframe(
             select_existing_columns(
                 user_df,
@@ -965,11 +900,9 @@ def page_realtime_explain(storage: ElasticStorage) -> None:
                 st.write("暂无异常原因")
 
             col1, col2 = st.columns(2)
-
             with col1:
                 st.markdown("**当前行为：**")
                 st.json(current)
-
             with col2:
                 dev_df = pd.DataFrame(
                     [
@@ -993,19 +926,7 @@ def page_recent_logs(storage: ElasticStorage) -> None:
     src_ip = col3.text_input("src_ip")
     status = col4.selectbox("status", ["全部", "success", "failed", "denied", "error"])
 
-    now_utc = utc_now()
-    t1, t2, t3, t4 = st.columns(4)
-    start_date = t1.date_input("开始日期", value=(now_utc - timedelta(days=1)).date())
-    start_clock = t2.time_input("开始时刻", value=(now_utc - timedelta(days=1)).time().replace(microsecond=0))
-    end_date = t3.date_input("结束日期", value=now_utc.date())
-    end_clock = t4.time_input("结束时刻", value=now_utc.time().replace(microsecond=0))
-
-    start_time = datetime.combine(start_date, start_clock).replace(tzinfo=timezone.utc)
-    end_time = datetime.combine(end_date, end_clock).replace(tzinfo=timezone.utc)
-
-    if end_time < start_time:
-        st.warning("结束时间早于开始时间，已自动交换。")
-        start_time, end_time = end_time, start_time
+    start_time, end_time = render_time_window_controls()
 
     must = [
         {
@@ -1072,8 +993,7 @@ def page_ai_reports(storage: ElasticStorage) -> None:
         st.info("暂无 AI 研判报告")
         return
 
-    df = pd.DataFrame(reports)
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(pd.DataFrame(reports), use_container_width=True)
 
 
 def page_daily_report(storage: ElasticStorage) -> None:
@@ -1081,8 +1001,7 @@ def page_daily_report(storage: ElasticStorage) -> None:
 
     if st.button("生成今日简报"):
         report = generate_daily_report(storage)
-        doc = report.model_dump(mode="json")
-        storage.index_document(settings.elasticsearch_daily_index, doc, doc_id=report.report_id)
+        storage.index_document(settings.elasticsearch_daily_index, report.model_dump(mode="json"), doc_id=report.report_id)
         st.success("简报已生成")
         st.markdown(report.markdown)
 
@@ -1134,8 +1053,7 @@ def page_system_health(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
         size=1,
         sort=[{"ingest_time": "desc"}],
     )
-    latest_time = latest[0].get("ingest_time") if latest else "N/A"
-    st.write(f"最近一次数据更新时间: {latest_time}")
+    st.write(f"最近一次数据更新时间: {latest[0].get('ingest_time') if latest else 'N/A'}")
 
     st.subheader("服务统计")
     c1, c2, c3, c4 = st.columns(4)
@@ -1151,43 +1069,12 @@ def page_system_health(storage: ElasticStorage, analyzer: AIAnalyzer) -> None:
 
 
 def main() -> None:
+    init_state()
     storage = get_storage()
     analyzer = get_analyzer()
+    render_sidebar_nav()
 
-    pages = [
-        "系统概览",
-        "UEBA 告警分析",
-        "用户画像",
-        "实时异常解释",
-        "最近日志",
-        "AI 研判",
-        "每日安全态势简报",
-        "系统运行状态",
-    ]
-
-    query_page = get_query_page(pages[0])
-    if query_page not in pages:
-        query_page = pages[0]
-
-    st.sidebar.title("日志分析 AI 助手")
-    st.sidebar.caption("实时日志流 · Docker Flink · UEBA 用户画像")
-
-    page = st.sidebar.radio(
-        "页面",
-        pages,
-        index=pages.index(query_page),
-        key="dashboard_page",
-    )
-
-    if st.sidebar.button("刷新当前页面", use_container_width=True):
-        try:
-            st.rerun()
-        except AttributeError:
-            st.experimental_rerun()
-
-    if page != query_page:
-        set_query_page(page)
-
+    page = st.session_state.get("current_page", PAGES[0])
     if page == "系统概览":
         page_overview(storage)
     elif page == "UEBA 告警分析":

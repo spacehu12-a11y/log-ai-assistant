@@ -60,3 +60,39 @@ log-generator/tmp_output/
 
 # downloaded connector jars
 lib/*.jar
+
+
+
+# ---------------------------------------------------------------------
+# log-ai-assistant local runtime artifacts
+# ---------------------------------------------------------------------
+runtime/
+
+# Generated log data
+logs/*.log
+logs/*.csv
+logs/*.jsonl
+log-generator/tmp_output/
+
+# Local generated baseline snapshots
+data/user_baselines.json
+
+# Large local connector jars
+lib/*.jar
+
+# Python local artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local virtual environments
+.venv/
+venv/
+
+# Windows metadata files
+*:Zone.Identifier
+
+# Project requirement documents
+resources/

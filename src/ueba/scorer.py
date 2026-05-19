@@ -41,7 +41,7 @@ class UebaScorer:
 
         result = self.score(log, baseline)
 
-        if result.ueba_score < 40:
+        if result.ueba_score < 15:
             return []
 
         return [self._build_alert(log, baseline, result)]
@@ -154,12 +154,14 @@ class UebaScorer:
         if prob >= 0.20:
             return 0
         if prob >= 0.10:
-            return 20
-        if prob >= 0.03:
+            return 25
+        if prob >= 0.05:
             return 45
-        if prob > 0:
+        if prob >= 0.02:
             return 65
-        return 80
+        if prob > 0:
+            return 85
+        return 100
 
     def _score_time(self, log: NormalizedLog, baseline: dict[str, Any]) -> tuple[int, list[str]]:
         profile = baseline.get("time_profile") or {}
@@ -333,9 +335,9 @@ class UebaScorer:
 
     @staticmethod
     def _risk_level(score: int) -> str:
-        if score >= 75:
+        if score >= 65:
             return "高"
-        if score >= 40:
+        if score >= 30:
             return "中"
         return "低"
 

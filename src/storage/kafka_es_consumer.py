@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 from kafka import KafkaConsumer, KafkaProducer
 
 from src.config import settings
-from src.detection import RuleEngine
 from src.schemas import AlertEvent, NormalizedLog
 from src.storage.elastic_client import ElasticStorage
+from src.ueba import UebaScorer
 
 
 class KafkaToElasticConsumer:
@@ -18,7 +18,7 @@ class KafkaToElasticConsumer:
         group_id: str = "log-ai-consume-to-es",
     ):
         self.storage = ElasticStorage()
-        self.rule_engine = RuleEngine()
+        self.ueba_scorer = UebaScorer(self.storage)
 
         self.consumer = KafkaConsumer(
             settings.kafka_parsed_topic,
@@ -39,12 +39,16 @@ class KafkaToElasticConsumer:
 
     def run(self, max_messages: int | None = None) -> int:
         self.storage.ensure_indices()
+
         consumed = 0
+
         for message in self.consumer:
             topic = message.topic
             payload = message.value
+
             if topic == settings.kafka_parsed_topic:
                 consumed += self._handle_parsed(payload)
+
             elif topic == settings.kafka_alert_topic:
                 consumed += self._handle_alert(payload)
 
@@ -54,27 +58,44 @@ class KafkaToElasticConsumer:
         self.alert_producer.flush()
         self.alert_producer.close()
         self.consumer.close()
+
         return consumed
 
     def _handle_parsed(self, payload: dict) -> int:
         log = NormalizedLog.model_validate(payload)
         doc = log.model_dump(mode="json")
-        self.storage.index_document(settings.elasticsearch_log_index, doc, doc_id=log.event_id)
 
-        generated = self.rule_engine.evaluate_log(log)
+        self.storage.index_document(
+            settings.elasticsearch_log_index,
+            doc,
+            doc_id=log.event_id,
+        )
+
+        generated = self.ueba_scorer.evaluate_log(log)
+
         for alert in generated:
             alert_doc = alert.model_dump(mode="json")
-            self.storage.index_document(settings.elasticsearch_alert_index, alert_doc, doc_id=alert.alert_id)
+
+            self.storage.index_document(
+                settings.elasticsearch_alert_index,
+                alert_doc,
+                doc_id=alert.alert_id,
+            )
+
             self.alert_producer.send(settings.kafka_alert_topic, alert_doc)
+
         return 1 + len(generated)
 
     def _handle_alert(self, payload: dict) -> int:
         if "detect_time" not in payload:
             payload["detect_time"] = datetime.now(timezone.utc).isoformat()
+
         alert = AlertEvent.model_validate(payload)
+
         self.storage.index_document(
             settings.elasticsearch_alert_index,
             alert.model_dump(mode="json"),
             doc_id=alert.alert_id,
         )
+
         return 1
